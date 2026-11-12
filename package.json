@@ -1,0 +1,6 @@
+{
+  "name": "workorder-reporting-cli",
+  "scripts": {
+    "test": "node --test"
+  }
+}
