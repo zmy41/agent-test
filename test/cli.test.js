@@ -409,3 +409,171 @@ test('query 无效日期按错误处理，退出码 1（设计 §8 开放问题 
   assert.equal(r.err, '错误：报工日期无效，须为 YYYY-MM-DD 的有效日历日期：2026-02-30\n');
   assert.equal(r.out, '');
 });
+
+// ---------- 本期新增：stat / export（docs/workorder-monthly-csv TASK-3/TASK-4，AC-1~AC-10 命令级） ----------
+
+const YM1 = '2026-11';
+const YM2 = '2026-12';
+const NO_MONTH = '（该月无报工记录）\n';
+const BOM = '\uFEFF';
+const CSV_HEADER = '日期,工单号,操作工,合格数量,不良数量';
+const invalidYm = (ym) => `错误：年月无效，须为 YYYY-MM 且月份为 01-12：${ym}\n`;
+
+/** AC-1 承载数据：一单三笔（D1 张三 30/2、D2 李四 40/1、D1 王五 5/0） */
+function monthWorkspace(t) {
+  const dir = tmpWorkspace(t);
+  run(['create', '支架', '100'], opts(dir, { now: NOW_D1 }));
+  run(['report', 'WO-20261112-01', D1, '张三', '30', '2'], opts(dir));
+  run(['report', 'WO-20261112-01', D2, '李四', '40', '1'], opts(dir));
+  run(['report', 'WO-20261112-01', D1, '王五', '5', '0'], opts(dir));
+  return dir;
+}
+
+test('stat 月度合计：恰三行、退出码 0（AC-1 命令级）', (t) => {
+  const dir = monthWorkspace(t);
+  const r = run(['stat', YM1], opts(dir));
+  assert.equal(r.code, 0);
+  assert.equal(r.err, '');
+  assert.equal(r.out, '报工笔数：3\n合格总数：75\n不良总数：3\n');
+});
+
+test('stat 跨工单合并：2 笔 / 40 / 2，不分工单展示（AC-2 命令级）', (t) => {
+  const dir = tmpWorkspace(t);
+  run(['create', 'A', '100'], opts(dir, { now: NOW_D1 }));
+  run(['create', 'B', '100'], opts(dir, { now: NOW_D1 }));
+  run(['report', 'WO-20261112-01', D1, '张三', '30', '2'], opts(dir));
+  run(['report', 'WO-20261112-02', D2, '李四', '10', '0'], opts(dir));
+  const r = run(['stat', YM1], opts(dir));
+  assert.equal(r.code, 0);
+  assert.equal(r.out, '报工笔数：2\n合格总数：40\n不良总数：2\n');
+});
+
+test('stat 空月：提示、退出码 0、无伪造数字（AC-3）；无数据文件同样为空提示且不建文件', (t) => {
+  const dir = monthWorkspace(t);
+  const r = run(['stat', YM2], opts(dir));
+  assert.equal(r.code, 0);
+  assert.equal(r.out, NO_MONTH);
+  assert.equal(r.err, '');
+  const dir2 = tmpWorkspace(t);
+  const r2 = run(['stat', YM1], opts(dir2));
+  assert.equal(r2.code, 0);
+  assert.equal(r2.out, NO_MONTH);
+  assert.equal(fs.existsSync(path.join(dir2, 'data.json')), false); // 只读命令不创建数据文件
+});
+
+test('stat 六类非法年月拒绝：code 1、stdout 空（无统计数字）；缺省走既有用法错误旧文案（AC-4）', (t) => {
+  const dir = monthWorkspace(t);
+  const file = path.join(dir, 'data.json');
+  const before = fs.readFileSync(file, 'utf8');
+  const cases = [
+    [['stat', '2026-13'], invalidYm('2026-13')],
+    [['stat', '2026-00'], invalidYm('2026-00')],
+    [['stat', '2026-1'], invalidYm('2026-1')],
+    [['stat', '202601'], invalidYm('202601')],
+    [['stat', 'abc'], invalidYm('abc')],
+    [['stat'], USAGE], // 缺省年月：既有用法错误（文案保持不变，裁决 1）
+    [['stat', YM1, 'extra'], USAGE],
+    [['stat', '--wo', 'X'], USAGE], // stat 无选项
+  ];
+  for (const [argv, message] of cases) {
+    const r = run(argv, opts(dir));
+    assert.equal(r.code, 1, JSON.stringify(argv));
+    assert.equal(r.out, '', JSON.stringify(argv));
+    assert.equal(r.err, message, JSON.stringify(argv));
+  }
+  assert.equal(fs.readFileSync(file, 'utf8'), before); // 只读：磁盘字节不变
+});
+
+test('stat 月份隔离：M1 与 M2 互不混入（AC-5 命令级）', (t) => {
+  const dir = tmpWorkspace(t);
+  run(['create', '支架', '100'], opts(dir, { now: NOW_D1 }));
+  run(['report', 'WO-20261112-01', D1, '张三', '30', '0'], opts(dir));
+  run(['report', 'WO-20261112-01', '2026-12-20', '李四', '20', '0'], opts(dir));
+  assert.equal(run(['stat', YM1], opts(dir)).out, '报工笔数：1\n合格总数：30\n不良总数：0\n');
+  assert.equal(run(['stat', YM2], opts(dir)).out, '报工笔数：1\n合格总数：20\n不良总数：0\n');
+});
+
+test('export 成功输出 = BOM + CSV、err 为空、行序日期升序同日按录入先后（AC-6/AC-10 命令级）', (t) => {
+  const dir = monthWorkspace(t);
+  const r = run(['export', YM1], opts(dir));
+  assert.equal(r.code, 0);
+  assert.equal(r.err, '');
+  assert.ok(r.out.startsWith(BOM), '输出应以 BOM 字符（\\uFEFF）开头');
+  assert.equal(
+    r.out.slice(1),
+    [
+      CSV_HEADER,
+      `${D1},WO-20261112-01,张三,30,2`,
+      `${D1},WO-20261112-01,王五,5,0`,
+      `${D2},WO-20261112-01,李四,40,1`,
+    ].join('\n') + '\n'
+  );
+});
+
+test('export 含逗号/双引号字段：引号包裹 + 引号双写（AC-7 命令级）', (t) => {
+  const dir = tmpWorkspace(t);
+  run(['create', '支架', '100'], opts(dir, { now: NOW_D1 }));
+  run(['report', 'WO-20261112-01', D1, '张三,李四', '10', '0'], opts(dir));
+  run(['report', 'WO-20261112-01', D1, '王"五"', '5', '0'], opts(dir));
+  const r = run(['export', YM1], opts(dir));
+  assert.equal(r.code, 0);
+  assert.equal(
+    r.out,
+    BOM +
+      [CSV_HEADER, `${D1},WO-20261112-01,"张三,李四",10,0`, `${D1},WO-20261112-01,"王""五""",5,0`].join('\n') +
+      '\n'
+  );
+});
+
+test('export 空月：BOM + 仅表头一行、退出码 0（AC-8）；无数据文件同样仅表头且不建文件', (t) => {
+  const dir = monthWorkspace(t);
+  const r = run(['export', YM2], opts(dir));
+  assert.equal(r.code, 0);
+  assert.equal(r.err, '');
+  assert.equal(r.out, BOM + `${CSV_HEADER}\n`);
+  const dir2 = tmpWorkspace(t);
+  const r2 = run(['export', YM1], opts(dir2));
+  assert.equal(r2.code, 0);
+  assert.equal(r2.out, BOM + `${CSV_HEADER}\n`);
+  assert.equal(fs.existsSync(path.join(dir2, 'data.json')), false);
+});
+
+test('export 六类非法年月拒绝：code 1、stdout 为空（无 BOM 无表头无数据行，无残缺 CSV）（AC-9）', (t) => {
+  const dir = monthWorkspace(t);
+  const file = path.join(dir, 'data.json');
+  const before = fs.readFileSync(file, 'utf8');
+  const cases = [
+    [['export', '2026-13'], invalidYm('2026-13')],
+    [['export', '2026-00'], invalidYm('2026-00')],
+    [['export', '2026-1'], invalidYm('2026-1')],
+    [['export', '202601'], invalidYm('202601')],
+    [['export', 'abc'], invalidYm('abc')],
+    [['export'], USAGE],
+    [['export', YM1, 'extra'], USAGE],
+    [['export', '--worker', 'X'], USAGE], // export 无选项
+  ];
+  for (const [argv, message] of cases) {
+    const r = run(argv, opts(dir));
+    assert.equal(r.code, 1, JSON.stringify(argv));
+    assert.equal(r.out, '', JSON.stringify(argv));
+    assert.equal(r.err, message, JSON.stringify(argv));
+  }
+  assert.equal(fs.readFileSync(file, 'utf8'), before); // 只读：磁盘字节不变
+});
+
+test('stat/export 损坏数据文件：既有损坏文案、stdout 空、不覆盖（只读同样先 load 后判损坏）', (t) => {
+  const dir = tmpWorkspace(t);
+  const file = path.join(dir, 'data.json');
+  fs.writeFileSync(file, '{oops', 'utf8');
+  for (const argv of [['stat', YM1], ['export', YM1]]) {
+    const r = run(argv, opts(dir));
+    assert.equal(r.code, 1, JSON.stringify(argv));
+    assert.equal(r.out, '', JSON.stringify(argv));
+    assert.equal(
+      r.err,
+      `错误：数据文件已损坏，已拒绝读写：${file}（请人工处理后重试）\n`,
+      JSON.stringify(argv)
+    );
+  }
+  assert.equal(fs.readFileSync(file, 'utf8'), '{oops'); // 未被覆盖
+});

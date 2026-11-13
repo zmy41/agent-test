@@ -126,6 +126,76 @@ function queryReports(data, dateStr, filter) {
   return rows;
 }
 
+// ---------- 本期新增：按月统计与 CSV 导出（docs/workorder-monthly-csv/02-design.md §4.2，纯函数无 I/O） ----------
+
+const YM_STR_RE = /^\d{4}-(0[1-9]|1[0-2])$/;
+const CSV_HEADER = '日期,工单号,操作工,合格数量,不良数量';
+
+/**
+ * true 仅当 ^\d{4}-(0[1-9]|1[0-2])$（Q-2：年月必填）。
+ * 不校验年份范围（0000-9999 均接受），无过去/未来限制（沿用"日期不做业务限制"口径）。
+ */
+function isValidYearMonthStr(s) {
+  return typeof s === 'string' && YM_STR_RE.test(s);
+}
+
+/**
+ * 按月查询（Q-1/Q-5）：遍历 orders（创建顺序）× reports（录入顺序），
+ * 取 report.date.slice(0, 7) === yearMonth 的记录（月份隔离，AC-5，纯前缀比较），
+ * -> [{ orderId, date, worker, okQty, badQty }]，按 date 升序稳定排序
+ * （比较器仅比 date；稳定排序保证同日保持遍历顺序，等价既有 detail/query 口径）。
+ * yearMonth 须已通过 isValidYearMonthStr（调用方先校验）；不修改入参，返回新数组。
+ */
+function queryMonthReports(data, yearMonth) {
+  const rows = [];
+  for (const order of data.orders) {
+    for (const report of order.reports) {
+      if (report.date.slice(0, 7) !== yearMonth) continue;
+      rows.push({
+        orderId: order.id,
+        date: report.date,
+        worker: report.worker,
+        okQty: report.okQty,
+        badQty: report.badQty,
+      });
+    }
+  }
+  return rows.sort((a, b) => {
+    if (a.date !== b.date) return a.date < b.date ? -1 : 1;
+    return 0; // 同日：Array.sort 稳定排序保持遍历（录入）顺序
+  });
+}
+
+/** -> { count: rows.length, okQty: Σ okQty, badQty: Σ badQty }（实际值直加，不封顶不剔除） */
+function summarizeMonth(rows) {
+  let okQty = 0;
+  let badQty = 0;
+  for (const row of rows) {
+    okQty += row.okQty;
+    badQty += row.badQty;
+  }
+  return { count: rows.length, okQty, badQty };
+}
+
+/** RFC 4180 式转义：String(field) 后含逗号/双引号/\r/\n 之一 → 引号包裹且内部双引号双写；否则原样 */
+function csvEscape(field) {
+  const s = String(field);
+  if (/[",\r\n]/.test(s)) return `"${s.replace(/"/g, '""')}"`;
+  return s;
+}
+
+/**
+ * -> CSV 文本：表头常量 + rows 每行 [date, orderId, worker, okQty, badQty] 逐字段转义，
+ * 行间 '\n' 连接，整个字符串以恰一个 '\n' 结尾；rows 为空时仅表头行（Q-5）。
+ */
+function toCsv(rows) {
+  const lines = [CSV_HEADER];
+  for (const row of rows) {
+    lines.push([row.date, row.orderId, row.worker, row.okQty, row.badQty].map(csvEscape).join(','));
+  }
+  return `${lines.join('\n')}\n`;
+}
+
 module.exports = {
   STATUS,
   formatDateKey,
@@ -139,4 +209,9 @@ module.exports = {
   computeStatus,
   sortDetailReports,
   queryReports,
+  isValidYearMonthStr,
+  queryMonthReports,
+  summarizeMonth,
+  csvEscape,
+  toCsv,
 };
