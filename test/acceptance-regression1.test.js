@@ -12,6 +12,11 @@
  * 约束遵守：仅新增本文件（命名以 acceptance 开头）；框架仅用 Node 内置
  * node:test（node --test 执行），真实进程冒烟用 node:child_process；零第三方
  * 依赖；不修改产品代码与既有测试文件，不删除/弱化既有用例。
+ *
+ * 修复轮 1（开发，修复测试报告 BUG-1）：L166 / L198 两例真实进程用例改为在
+ * create 后从其实际 stdout 解析工单号再传给后续命令（真实时钟下工单号日期段
+ * 随宿主日期变化，原硬编码 WO-20261112-01 仅在 2026-11-12 当天可过）；两例的
+ * 验证目标与全部既有断言原样保留，仅新增"create 输出含工单号"解析断言。
  */
 
 const test = require('node:test');
@@ -169,9 +174,14 @@ test('BUG-1 修复（真实进程）：report 写盘失败路径（只读数据�
   const env = childEnv({ WORKORDER_DATA_FILE: file });
   const cr = cli(['create', '轴承', '50'], dir, env);
   assert.equal(cr.status, 0, cr.stderr);
+  // 修复轮 1（测试报告 BUG-1）：真实时钟下工单号日期段随宿主日期变化，
+  // 从 create 实际输出解析工单号再报工，不硬编码日期
+  const created = /^已创建：(WO-\d{8}-\d{2})\n$/.exec(cr.stdout);
+  assert.ok(created, `create 输出应为「已创建：WO-YYYYMMDD-NN」单行，实际：${JSON.stringify(cr.stdout)}`);
+  const woId = created[1];
   const before = snapshot(file);
   fs.chmodSync(file, 0o444);
-  const rp = cli(['report', 'WO-20261112-01', D1, '张三', '5', '0'], dir, env);
+  const rp = cli(['report', woId, D1, '张三', '5', '0'], dir, env);
   assert.equal(rp.status, 1);
   assert.equal(rp.stdout, '');
   assertPlainSingleLineError(rp.stderr, 'report 写盘失败 stderr');
@@ -202,14 +212,19 @@ test('AC-14 回归（真实进程）：覆盖路径仍正常——写 P、默认
   const env = childEnv({ WORKORDER_DATA_FILE: p });
   const c1 = cli(['create', '轴承', '50'], dir, env);
   assert.equal(c1.status, 0, c1.stderr);
+  // 修复轮 1（测试报告 BUG-1）：真实时钟下工单号日期段随宿主日期变化，
+  // 从 create 实际输出解析工单号再 detail/report，不硬编码日期
+  const created = /^已创建：(WO-\d{8}-\d{2})\n$/.exec(c1.stdout);
+  assert.ok(created, `create 输出应为「已创建：WO-YYYYMMDD-NN」单行，实际：${JSON.stringify(c1.stdout)}`);
+  const woId = created[1];
   assert.equal(fs.existsSync(p), true, '数据应写入覆盖路径 P');
   assert.equal(fs.existsSync(path.join(dir, 'data.json')), false, '默认 data.json 不被创建');
   // 进程级"重启"：第二个独立进程以同一 env 读回
-  const c2 = cli(['detail', 'WO-20261112-01'], dir, env);
+  const c2 = cli(['detail', woId], dir, env);
   assert.equal(c2.status, 0, c2.stderr);
-  assert.match(c2.stdout, /WO-\d{8}-01 \| 轴承 \| 50 \| 0 \| 0 \| 0% \| 待开工/);
+  assert.match(c2.stdout, new RegExp(`^${woId} \\| 轴承 \\| 50 \\| 0 \\| 0 \\| 0% \\| 待开工$`, 'm'));
   // 同 env 继续报工并按日查询（AC-14 的"以同一变量再次执行可读到"）
-  const c3 = cli(['report', 'WO-20261112-01', D1, '张三', '10', '0'], dir, env);
+  const c3 = cli(['report', woId, D1, '张三', '10', '0'], dir, env);
   assert.equal(c3.status, 0, c3.stderr);
   const c4 = cli(['query', D1], dir, env);
   assert.equal(c4.status, 0, c4.stderr);

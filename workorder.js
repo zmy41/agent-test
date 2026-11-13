@@ -3,7 +3,7 @@
 /**
  * workorder.js —— CLI 入口（设计 §4.1 / §4.5 / §5）
  * 一次性命令模型：parseArgs → load → 校验（全过才动数据）→ 变更内存 data → save → 输出。
- * list/detail/query 为只读命令，不写盘；create/report 校验全部通过后才 save。
+ * list/detail/query/stat/export 为只读命令，不写盘；create/report 校验全部通过后才 save。
  */
 
 const { resolveDataPath, load, save } = require('./store');
@@ -20,11 +20,16 @@ const COMMAND_SPECS = {
   list: { positional: 0, flags: [] },
   detail: { positional: 1, flags: [] },
   query: { positional: 1, flags: ['wo', 'worker'] },
+  stat: { positional: 1, flags: [] },
+  export: { positional: 1, flags: [] },
 };
 
 const LIST_HEADER = '工单号 | 产品 | 计划 | 累计合格 | 累计不良 | 进度 | 状态';
 const NO_ORDERS_HINT = '（暂无工单）';
 const NO_RECORDS_HINT = '（无报工记录）';
+// 本期新增（docs/workorder-monthly-csv/02-design.md §4.3）；USAGE_ERROR 等既有常量不变
+const NO_MONTH_RECORDS_HINT = '（该月无报工记录）';
+const INVALID_YM_PREFIX = '错误：年月无效，须为 YYYY-MM 且月份为 01-12：';
 
 /**
  * argv 为去掉 node 与脚本名的参数数组
@@ -162,6 +167,26 @@ function doQuery(data, dateStr, flags) {
   return succeed(`${lines.join('\n')}\n`);
 }
 
+/** stat：月度合计（只读；有数据恰三行，空月输出提示不报错，Q-5） */
+function doStat(data, yearMonth) {
+  if (!logic.isValidYearMonthStr(yearMonth)) {
+    return fail(`${INVALID_YM_PREFIX}${yearMonth}`);
+  }
+  const rows = logic.queryMonthReports(data, yearMonth);
+  if (rows.length === 0) return succeed(`${NO_MONTH_RECORDS_HINT}\n`);
+  const t = logic.summarizeMonth(rows);
+  return succeed(`报工笔数：${t.count}\n合格总数：${t.okQty}\n不良总数：${t.badQty}\n`);
+}
+
+/** export：月度明细 CSV（只读；成功 out = '\uFEFF' + CSV、err 恒为 ''，失败无残缺 CSV） */
+function doExport(data, yearMonth) {
+  if (!logic.isValidYearMonthStr(yearMonth)) {
+    return fail(`${INVALID_YM_PREFIX}${yearMonth}`);
+  }
+  const rows = logic.queryMonthReports(data, yearMonth);
+  return succeed(`\uFEFF${logic.toCsv(rows)}`);
+}
+
 /**
  * 可测入口 -> { code: 0|1, out: string, err: string }
  * out/err 非空时均以单个换行结尾，可直接写流。
@@ -193,6 +218,10 @@ function run(argv, opts = {}) {
       return doDetail(data, parsed.positional[0]);
     case 'query':
       return doQuery(data, parsed.positional[0], parsed.flags);
+    case 'stat':
+      return doStat(data, parsed.positional[0]);
+    case 'export':
+      return doExport(data, parsed.positional[0]);
     default:
       return fail(USAGE_ERROR);
   }
